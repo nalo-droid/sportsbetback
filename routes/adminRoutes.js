@@ -3,6 +3,7 @@ import Match from '../models/Match.js';
 import User from '../models/User.js';
 import Transaction from '../models/Transaction.js';
 import fetch from 'node-fetch';
+import mongoose from 'mongoose';
 
 const router = express.Router();
 
@@ -189,29 +190,22 @@ router.put('/updateStatus', async (req, res) => {
 router.post('/create-matches', async (req, res) => {
   try {
     const { matches } = req.body;
-
-    // Validate input
-    if (!Array.isArray(matches) || matches.length === 0) {
-      return res.status(400).json({ message: 'Invalid matches array' });
+    
+    if (!matches || !Array.isArray(matches) || matches.length === 0) {
+      return res.status(400).json({
+        message: 'Invalid request: matches array is required'
+      });
     }
 
-    const newMatches = matches.map(m => {
-      // Validate required fields
-      if (!m.homeTeam || !m.awayTeam || !m.amount || !m.matchDate) {
-        throw new Error('Missing required fields for match');
-      }
-
-      const matchDate = new Date(m.matchDate);
-      if (isNaN(matchDate)) {
-        throw new Error('Invalid match date');
-      }
-
+    // Ensure all matches have the required fields
+    const newMatches = matches.map(match => {
       return {
-        homeTeam: m.homeTeam,
-        awayTeam: m.awayTeam,
-        amount: m.amount,
-        matchDate,
-        apiId: m.apiId || null,
+        homeTeam: match.homeTeam,
+        awayTeam: match.awayTeam,
+        matchDate: match.matchDate,
+        apiId: match.apiId || null,
+        isTemplate: true,
+        bets: [],
         status: 'active'
       };
     });
@@ -230,15 +224,69 @@ router.post('/create-matches', async (req, res) => {
 router.delete('/delete-match/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const deletedMatch = await Match.findByIdAndDelete(id);
+    
+    // Start a session for transaction atomicity
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-    if (!deletedMatch) {
-      return res.status(404).json({ message: 'Match not found' });
+    try {
+      // Find the template match
+      const templateMatch = await Match.findById(id);
+      if (!templateMatch) {
+        throw new Error('Template match not found.');
+      }
+
+      // Find all user games created from this template
+      const userGames = await Match.find({ originalTemplate: id });
+
+      // For each user game, refund the users and delete the game
+      for (const game of userGames) {
+        if (game.status === 'active') {
+          // Refund all users who placed bets
+          for (const bet of game.bets) {
+            const user = await User.findById(bet.userId);
+            if (user) {
+              user.balance += game.amount;
+              await user.save({ session });
+
+              // Create refund transaction
+              await Transaction.create([{
+                userId: bet.userId,
+                matchId: game._id,
+                amount: game.amount,
+                type: 'credit',
+                status: 'completed',
+                description: 'Refund due to match deletion'
+              }], { session });
+            }
+          }
+        }
+      }
+
+      // Delete all user games created from this template
+      await Match.deleteMany({ originalTemplate: id }, { session });
+
+      // Finally delete the template match
+      await Match.findByIdAndDelete(id, { session });
+
+      await session.commitTransaction();
+      
+      res.json({ 
+        message: 'Match and all related games deleted successfully',
+        gamesDeleted: userGames.length
+      });
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
     }
-
-    res.json({ message: 'Match deleted successfully' });
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
+    console.error('Error deleting match:', error);
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -308,6 +356,235 @@ router.get('/fetch-matches/:leagueId', async (req, res) => {
     res.json({ matches: upcomingMatches });
   } catch (error) {
     res.status(500).json({ message: 'Error fetching matches', error: error.message });
+  }
+});
+
+// Add this new route to get template statistics
+router.get('/template-stats/:templateId', async (req, res) => {
+  try {
+    const { templateId } = req.params;
+
+    // Find all matches created from this template
+    const userGames = await Match.find({
+      originalTemplate: templateId,
+      isTemplate: false
+    }).populate('bets');
+
+    const stats = {
+      activeGames: userGames.filter(game => game.status === 'active' || game.status === 'inplay').length,
+      totalUsers: new Set(userGames.flatMap(game => game.bets.map(bet => bet.userId.toString()))).size,
+      totalStakes: userGames.reduce((sum, game) => {
+        // Calculate total stakes by multiplying number of bets by game amount
+        return sum + (game.bets.length * game.amount);
+      }, 0)
+    };
+
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching template statistics', error: error.message });
+  }
+});
+
+// Update the declare-template-results route
+router.post('/declare-template-results', async (req, res) => {
+  // Start a session for transaction atomicity
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { templateId, homeScore, awayScore } = req.body;
+    
+    // Find all active games created from this template
+    const activeGames = await Match.find({
+      originalTemplate: templateId,
+      status: 'inplay'
+    }).populate('bets.userId');
+
+    if (activeGames.length === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: 'No active games found for this template' });
+    }
+
+    // Determine winner
+    let winnerTeam;
+    if (homeScore > awayScore) winnerTeam = 'home';
+    else if (awayScore > homeScore) winnerTeam = 'away';
+    else winnerTeam = 'draw';
+
+    // Process each game
+    for (const game of activeGames) {
+      // Get winning bets
+      const winningBets = winnerTeam === 'draw' 
+        ? game.bets 
+        : game.bets.filter(bet => bet.betType === winnerTeam);
+
+      // Calculate winning amount from the pre-calculated pool
+      const winningAmount = game.winningPool / winningBets.length;
+
+      // Update winners' balances and create transactions
+      for (const bet of winningBets) {
+        const user = await User.findById(bet.userId);
+        user.balance += winningAmount;
+        await user.save({ session });
+
+        // Create transaction record
+        await Transaction.create([{
+          userId: bet.userId,
+          matchId: game._id,
+          amount: winningAmount,
+          type: 'credit',
+          status: 'completed',
+          description: `Won bet on ${game.homeTeam} vs ${game.awayTeam} (${winnerTeam})`
+        }], { session });
+      }
+
+      // Update match status and scores
+      game.status = 'completed';
+      game.winnerTeam = winnerTeam;
+      game.scoreHome = homeScore;
+      game.scoreAway = awayScore;
+      await game.save({ session });
+    }
+
+    // Update template status
+    const template = await Match.findById(templateId);
+    template.status = 'completed';
+    template.scoreHome = homeScore;
+    template.scoreAway = awayScore;
+    template.winnerTeam = winnerTeam;
+    await template.save({ session });
+
+    await session.commitTransaction();
+
+    res.json({ 
+      message: 'Results declared and winnings distributed successfully',
+      gamesProcessed: activeGames.length
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Error declaring results:', error);
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message 
+    });
+  } finally {
+    session.endSession();
+  }
+});
+
+// Temporary route for testing - Remove when implementing real payments
+router.post('/add-balance', async (req, res) => {
+  // Start a session for transaction atomicity
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { userId, amount } = req.body;
+
+    if (!userId || !amount || amount <= 0) {
+      return res.status(400).json({ 
+        message: 'Please provide both userId and a positive amount' 
+      });
+    }
+
+    // Find user within the session
+    const user = await User.findById(userId).session(session);
+    if (!user) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    try {
+      // Add the amount to user's balance
+      user.balance += Number(amount);
+      await user.save({ session });
+
+      // Create a transaction record within the session
+      const transaction = await Transaction.create([{
+        userId: user._id,
+        matchId: null, // This is causing the validation error, need to make it optional
+        amount: amount,
+        type: 'credit',
+        status: 'completed',
+        description: 'Admin balance top-up (Testing)'
+      }], { session });
+
+      // Commit the transaction
+      await session.commitTransaction();
+
+      res.json({ 
+        message: 'Balance added successfully',
+        newBalance: user.balance,
+        user: user.username
+      });
+    } catch (error) {
+      // If any error occurs, abort the transaction
+      await session.abortTransaction();
+      throw error;
+    }
+  } catch (error) {
+    // If any error occurs, abort the transaction
+    await session.abortTransaction();
+    console.error('Error adding balance:', error);
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message 
+    });
+  } finally {
+    // End the session
+    session.endSession();
+  }
+});
+
+// Add this route to get all users
+router.get('/users', async (req, res) => {
+  try {
+    const users = await User.find({}, 'username balance');
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ 
+      message: 'Error fetching users', 
+      error: error.message 
+    });
+  }
+});
+
+// Add this new route to get house profits
+router.get('/house-profits', async (req, res) => {
+  try {
+    const completedMatches = await Match.find({
+      status: 'completed',
+      isTemplate: false
+    });
+
+    const profits = {
+      totalCommission: 0,
+      totalMatches: completedMatches.length,
+      matchDetails: []
+    };
+
+    // Calculate total commission and gather match details
+    for (const match of completedMatches) {
+      const commission = match.houseCommission || 0;
+      profits.totalCommission += commission;
+      
+      if (commission > 0) {
+        profits.matchDetails.push({
+          matchId: match._id,
+          teams: `${match.homeTeam} vs ${match.awayTeam}`,
+          commission: commission,
+          totalPool: match.totalPool,
+          date: match.matchDate
+        });
+      }
+    }
+
+    res.json(profits);
+  } catch (error) {
+    res.status(500).json({ 
+      message: 'Error calculating house profits', 
+      error: error.message 
+    });
   }
 });
 
