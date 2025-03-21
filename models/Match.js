@@ -1,20 +1,45 @@
 import mongoose from 'mongoose';
 
 const matchSchema = new mongoose.Schema({  
-  homeTeam: { type: String, required: true },
-  awayTeam: { type: String, required: true },
+  homeTeam: { 
+    type: String, 
+    required: true,
+    trim: true 
+  },
+  awayTeam: { 
+    type: String, 
+    required: true,
+    trim: true 
+  },
   bets: [{
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     betType: { type: String, enum: ['home', 'draw', 'away'] },
+    amount: { type: Number }
   }],
-  amount: { type: Number, required: function() { return !this.isTemplate; }, min: 1 },
-  status: { type: String, enum: ['active','cancelled','inplay', 'completed'], default: 'active' },
-  winnerTeam: { type: String, enum: ['home', 'draw', 'away', null], default: null },
+  amount: { 
+    type: Number, 
+    required: function() { return !this.isTemplate; }, 
+    min: 1 
+  },
+  status: { 
+    type: String, 
+    enum: ['active', 'cancelled', 'inplay', 'completed'], 
+    default: 'active' 
+  },
+  winnerTeam: { 
+    type: String, 
+    enum: ['home', 'draw', 'away', null], 
+    default: null 
+  },
   scoreHome: { type: String, default: null },
   scoreAway: { type: String, default: null },
   matchDate: { type: Date, required: true },
   isTemplate: { type: Boolean, default: false },
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  createdBy: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User', 
+    default: null 
+  },
   originalTemplate: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'Match',
@@ -22,9 +47,11 @@ const matchSchema = new mongoose.Schema({
   },
   totalPool: { type: Number, default: 0 },
   houseCommission: { type: Number, default: 0 },
-  winningPool: { type: Number, default: 0 }
+  winningPool: { type: Number, default: 0 },
+  homeTeamLogo: { type: String },
+  awayTeamLogo: { type: String },
+  apiId: { type: Number }
 }, {timestamps: true});
- 
 
 const Match = mongoose.model('Match', matchSchema);
 

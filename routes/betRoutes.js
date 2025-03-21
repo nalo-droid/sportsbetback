@@ -227,6 +227,8 @@ router.post('/create-game', async (req, res) => {
     const newMatch = new Match({
       homeTeam: templateMatch.homeTeam,
       awayTeam: templateMatch.awayTeam,
+      homeTeamLogo: templateMatch.homeTeamLogo,
+      awayTeamLogo: templateMatch.awayTeamLogo,
       amount: stakeAmount,
       matchDate: templateMatch.matchDate,
       status: 'active',

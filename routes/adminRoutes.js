@@ -197,22 +197,40 @@ router.post('/create-matches', async (req, res) => {
       });
     }
 
-    // Ensure all matches have the required fields
+    // Log the incoming data for debugging
+    console.log('Received matches data:', matches);
+
     const newMatches = matches.map(match => {
+      // Validate required fields
+      if (!match.homeTeam || !match.awayTeam) {
+        throw new Error('Home team and away team are required');
+      }
+
       return {
         homeTeam: match.homeTeam,
         awayTeam: match.awayTeam,
-        matchDate: match.matchDate,
+        homeTeamLogo: match.homeTeamLogo || null,
+        awayTeamLogo: match.awayTeamLogo || null,
+        matchDate: new Date(match.matchDate),
         apiId: match.apiId || null,
         isTemplate: true,
-        bets: [],
-        status: 'active'
+        status: match.status || 'active',
+        bets: []
       };
     });
 
-    const created = await Match.insertMany(newMatches);
-    res.json({ createdCount: created.length, matches: created });
+    // Log the processed data
+    console.log('Processed matches data:', newMatches);
+
+    const created = await Match.create(newMatches);
+    
+    res.status(201).json({ 
+      message: 'Matches created successfully',
+      createdCount: created.length, 
+      matches: created 
+    });
   } catch (error) {
+    console.error('Error creating matches:', error);
     res.status(400).json({
       message: 'Validation failed',
       error: error.message
@@ -349,9 +367,23 @@ router.get('/fetch-matches/:leagueId', async (req, res) => {
 
     const data = await response.json();
 
-    // Filter out past matches
+    // Filter out past matches and ensure we have team crests
     const currentDate = new Date();
-    const upcomingMatches = data.matches.filter(match => new Date(match.utcDate) > currentDate);
+    const upcomingMatches = data.matches
+      .filter(match => new Date(match.utcDate) > currentDate)
+      .map(match => ({
+        ...match,
+        homeTeam: {
+          ...match.homeTeam,
+          // Use default logo if crest is not available
+          crest: match.homeTeam.crest || 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/46/Question_mark_%28black%29.svg/800px-Question_mark_%28black%29.svg.png'
+        },
+        awayTeam: {
+          ...match.awayTeam,
+          // Use default logo if crest is not available
+          crest: match.awayTeam.crest || 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/46/Question_mark_%28black%29.svg/800px-Question_mark_%28black%29.svg.png'
+        }
+      }));
 
     res.json({ matches: upcomingMatches });
   } catch (error) {
