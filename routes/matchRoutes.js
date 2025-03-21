@@ -129,4 +129,24 @@ router.get('/user-games', async (req, res) => {
   }
 });
 
+// Add this new route to get completed matches
+router.get('/completed', async (req, res) => {
+  try {
+    const completedMatches = await Match.find({
+      status: 'completed',
+      isTemplate: false
+    })
+    .sort({ updatedAt: -1 }) // Sort by most recently completed
+    .limit(20) // Limit to 20 matches
+    .populate('bets.userId');
+
+    res.json(completedMatches);
+  } catch (error) {
+    res.status(500).json({ 
+      message: 'Error fetching completed matches', 
+      error: error.message 
+    });
+  }
+});
+
 export default router;
